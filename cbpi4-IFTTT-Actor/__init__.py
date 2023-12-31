@@ -1,77 +1,88 @@
-
 # -*- coding: utf-8 -*-
-import os
-from aiohttp import web
-import logging
-from unittest.mock import MagicMock, patch
-import asyncio
-import random
+# pylint: disable=invalid-name
+"""cbpi4-IFTTT-Actor is a plugin for CraftBeerPi 4
+"""
+import requests
+from cbpi.craftbeerpi import CraftBeerPi
 from cbpi.api import *
 
-logger = logging.getLogger(__name__)
+_EVENT_NAME = "Event Name"
+_IFTTT_KEY = "IFTTT Key"
+_INDICATOR = "%s"
 
 
-class CustomWebExtension(CBPiExtension):
+@parameters(
+    [
+        Property.Text(
+            label=_IFTTT_KEY, configurable=True, description="Your IFTTT Key"
+        ),
+        Property.Text(
+            label=_EVENT_NAME,
+            configurable=True,
+            description="Event Name with optional '%s' for 'on' or 'off'",
+        ),
+    ]
+)
+class IFTTTActor(CBPiActor):
+    """IFTTTActor is a CraftBeerPi 4 Actor using IFTTT Maker Webhooks"""
+    def __init__(
+        self, cbpi: CraftBeerPi, _id, props
+    ):  # pylint: disable=redefined-builtin
+        super().__init__(cbpi, _id, props)
+        self.name = [a.name for a in cbpi.actor.data if a.id == _id][0]
+        self.power = None
 
-    @request_mapping(path="/", auth_required=False)
-    async def hello_world(self, request):
-        return web.HTTPFound('static/index.html')
+    @action(
+        "Set Power",
+        parameters=[
+            Property.Number(
+                label="Power", configurable=True, description="Power Setting [0-100]"
+            )
+        ],
+    )
+    async def setpower(self, Power=100):
+        """setpower is a CraftBeerPi action"""
+        self.logger.debug("%s.setpower(Power=%d)", self.name, Power)
+        Power = int(Power)
+        if Power < 0:
+            Power = 0
+        elif Power > 100:
+            Power = 100
+        await self.on(Power)
 
-    def __init__(self, cbpi):
-        self.cbpi = cbpi
-        path = os.path.dirname(__file__)
-        self.cbpi.register(self, "/cbpi_uiplugin", static=os.path.join(path, "static"))
+    async def on_start(self):
+        self.logger.debug("%s.on_start()", self.name)
+        await self.off()
 
-
-@parameters([])
-class CustomSensor(CBPiSensor):
-    
-    def __init__(self, cbpi, id, props):
-        super(CustomSensor, self).__init__(cbpi, id, props)
-        self.value = 0
-
-    @action(key="Test", parameters=[])
-    async def action1(self, **kwargs):
-        print("ACTION!", kwargs)
-
-    async def run(self):
-        while self.running is True:
-            self.value = random.randint(0,50)
-            self.push_update(self.value)
-            await asyncio.sleep(1)
-    
-    def get_state(self):
-        return dict(value=self.value)
-
-@parameters([])
-class CustomActor(CBPiActor):
-
-    @action("action", parameters={})
-    async def action(self, **kwargs):
-        print("Action Triggered", kwargs)
-        pass
-    
-    def on_start(self):
-        self.state = False
-        pass
+    async def on_stop(self):
+        self.logger.debug("%s.on_stop()", self.name)
+        await self.off()  # it is better to lose a batch than burn down a house
 
     async def on(self, power=0):
-        logger.info("ACTOR 1111 %s ON" % self.id)
+        self.logger.debug("%s.on(power=%d)", self.name, power)
         self.state = True
+        self.power = power
+        self.trigger()
 
     async def off(self):
-        logger.info("ACTOR %s OFF " % self.id)
+        self.logger.debug("%s.off()", self.name)
         self.state = False
+        self.power = 0
+        self.trigger()
 
-    def get_state(self):
-        return self.state
-    
-    async def run(self):
-        pass
+    def trigger(self):
+        """trigger the IFTTT Maker Webhook"""
+        event = self.props.get(_EVENT_NAME)
+        partial = f"https://maker.ifttt.com/trigger/{event}".replace(
+            _INDICATOR, "on" if self.power else "off"
+        )
+        url = partial + f"/with/key/{self.props.get(_IFTTT_KEY)}"
+        power = {"power": self.power} if _INDICATOR in event else None
+        res = requests.post(url, json=power, timeout=10)
+        log = self.logger.info if res.ok else self.logger.warning
+        log("%s.trigger(): POST %s status=%d", self.name, partial, res.status_code)
 
 
-def setup(cbpi):
-    #cbpi.plugin.register("MyCustomActor", CustomActor)
-    #cbpi.plugin.register("MyCustomSensor", CustomSensor)
-    #cbpi.plugin.register("MyustomWebExtension", CustomWebExtension)
-    pass
+def setup(cbpi4):
+    """register the plugin"""
+    cbpi4.plugin.register("IFTTT-Actor", IFTTTActor)
